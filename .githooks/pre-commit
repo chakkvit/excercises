@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# Enable with: npm run setup   (or: git config core.hooksPath .githooks)
+# Bypass once with: git commit --no-verify
+#
+# Git for Windows ships its own sh, so this hook runs on Windows too. It calls
+# `node --test` with no arguments: Node does the test discovery itself, so no
+# shell glob expansion is required anywhere.
+echo "[pre-commit] running tests..."
+if ! node --test > .git/precommit.log 2>&1; then
+  echo "[pre-commit] tests FAILED -- commit blocked."
+  tail -25 .git/precommit.log
+  exit 1
+fi
+echo "[pre-commit] tests passed."

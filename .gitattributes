@@ -1,0 +1,4 @@
+# Keep everything LF in the repo. Without this, a Windows checkout can rewrite
+# the shell hook to CRLF, and `sh` then fails with a confusing "\r: not found".
+* text=auto eol=lf
+*.cmd text eol=crlf
