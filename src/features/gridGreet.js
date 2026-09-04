@@ -3,11 +3,11 @@
 const { register } = require('../registry');
 
 register(
-  'Gridgreet',
+  'Gridgreets',
   {
     description: 'Says hello to whoever is passed in.',
     author: 'starter-kit',
-    addedIn: 'v0.1.0',
+    addedIn: 'v0.1.2',
   },
   (who = 'world') => `Hello, ${who}!`
 );
