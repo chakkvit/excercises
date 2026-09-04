@@ -6,8 +6,16 @@
 # artifact per changed sub-project because a single emr-demo checkout ships
 # many independent projects to many sites (deployment/sites.yml). This repo
 # is one app, so there is only ever one artifact -- the multi-project/site
-# machinery is dropped. Tag resolution, base-tag diffing, the PR list, the
-# checksums, and `gh release create` carry over as-is.
+# machinery is dropped. Tag resolution, the PR list, the checksums, and
+# `gh release create` carry over as-is.
+#
+# Base-tag diffing does NOT carry over as-is: emr-demo just diffs against the
+# previous tag. Here every release is published as a GitHub pre-release (see
+# the last step) until mark-deployed.yml flags it deployed, and the base tag
+# is whatever `gh release view` reports as latest -- i.e. the last release
+# someone actually confirmed shipped, not just the last one cut. That way a
+# tag that got created but never deployed doesn't reset what counts as "new"
+# in the next release's PR list and changed-files diff.
 name: Release
 
 on:
@@ -86,23 +94,25 @@ jobs:
           TAG: ${{ steps.vars.outputs.tag }}
         run: git checkout "$TAG"
 
-      # Step 2: find the previous release to diff against. --match 'v*' keeps
-      # this scoped to release tags even if labs leave other tags lying around.
+      # Step 2: find the last *deployed* release to diff against. `gh release
+      # view` with no tag returns GitHub's own "latest release" -- defined as
+      # the most recent non-prerelease, non-draft release -- which is exactly
+      # the last one mark-deployed.yml confirmed shipped.
       - name: Find the base tag to diff against
         id: base
         env:
-          TAG: ${{ steps.vars.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
           INPUT_BASE: ${{ github.event.inputs.base }}
         run: |
           if [ -n "$INPUT_BASE" ]; then
             BASE="$INPUT_BASE"
             echo "using given base: $BASE"
-          elif PREV=$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null); then
-            BASE="$PREV"
-            echo "found previous tag: $BASE"
+          elif DEPLOYED=$(gh release view --json tagName -q .tagName 2>/dev/null) && [ -n "$DEPLOYED" ]; then
+            BASE="$DEPLOYED"
+            echo "found last deployed release: $BASE"
           else
             BASE="4b825dc642cb6eb9a060e54bf8d69288fbee4904" # empty tree
-            echo "no previous tag -- diffing against an empty tree"
+            echo "no deployed release yet -- diffing against an empty tree"
           fi
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
 
@@ -206,6 +216,10 @@ jobs:
           } > dist/RELEASE-NOTES.md
           cat dist/RELEASE-NOTES.md
 
+      # Step 7: publish as a pre-release -- every release starts flagged
+      # "not deployed yet" in the GitHub UI. Run mark-deployed.yml after
+      # actually shipping it to flip that off; the base-tag step above only
+      # counts a release once that has happened.
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -214,4 +228,5 @@ jobs:
           gh release create "$TAG" \
             dist/*.tar.gz dist/checksums.txt dist/changed-files.txt \
             --title "$TAG" \
-            --notes-file dist/RELEASE-NOTES.md
+            --notes-file dist/RELEASE-NOTES.md \
+            --prerelease
