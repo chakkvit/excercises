@@ -38,6 +38,13 @@ on:
 permissions:
   contents: write
   pull-requests: read
+  discussions: write
+
+# Discussion category the release thread is opened in. Must match a category
+# that exists under the repo's Discussions tab -- if it doesn't, the release
+# is still published, just without a discussion (see the last step).
+env:
+  DISCUSSION_CATEGORY: Announcements
 
 jobs:
   release:
@@ -221,13 +228,41 @@ jobs:
       # edit the release on the Releases page and uncheck "Set as a
       # pre-release" (or check "Set as the latest release"). The base-tag
       # step above only counts a release once that has happened.
+      #
+      # --discussion-category opens a discussion thread linked to the release,
+      # so questions about "did this one go out / is it safe to deploy" live
+      # next to the release itself. The category has to exist or gh refuses to
+      # create the release at all -- and the tag is already pushed by then --
+      # so it's checked first and dropped if missing rather than losing the
+      # whole release over a discussion thread.
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.vars.outputs.tag }}
         run: |
+          set -euo pipefail
+
+          ARGS=()
+          if gh api graphql -f query='
+                query($owner:String!, $repo:String!) {
+                  repository(owner:$owner, name:$repo) {
+                    discussionCategories(first:50) { nodes { name } }
+                  }
+                }' -F owner="${GITHUB_REPOSITORY%/*}" -F repo="${GITHUB_REPOSITORY#*/}" \
+                --jq '.data.repository.discussionCategories.nodes[].name' 2>/dev/null \
+                | grep -qxF "$DISCUSSION_CATEGORY"; then
+            echo "==> opening release discussion in: $DISCUSSION_CATEGORY"
+            ARGS+=(--discussion-category "$DISCUSSION_CATEGORY")
+          else
+            echo "==> no '$DISCUSSION_CATEGORY' discussion category (or Discussions is off) -- publishing without one"
+          fi
+
+          # ${ARGS[@]+...} so an empty array expands to nothing instead of
+          # tripping `set -u` -- that's the no-discussion path, which must
+          # never be the thing that fails a release.
           gh release create "$TAG" \
             dist/*.tar.gz dist/checksums.txt dist/changed-files.txt \
             --title "$TAG" \
             --notes-file dist/RELEASE-NOTES.md \
-            --prerelease
+            --prerelease \
+            ${ARGS[@]+"${ARGS[@]}"}
