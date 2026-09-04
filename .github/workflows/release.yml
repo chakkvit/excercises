@@ -1,0 +1,217 @@
+# Creates a GitHub Release when a tag starting with "v" is pushed, or on
+# demand via workflow_dispatch -- the same tagging convention EXERCISES.md
+# Lab 5/6 already teaches by hand (git tag -a v1.0.0 ...).
+#
+# Adapted from emr-demo's release-project.yml. That workflow packages one
+# artifact per changed sub-project because a single emr-demo checkout ships
+# many independent projects to many sites (deployment/sites.yml). This repo
+# is one app, so there is only ever one artifact -- the multi-project/site
+# machinery is dropped. Tag resolution, base-tag diffing, the PR list, the
+# checksums, and `gh release create` carry over as-is.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create/use, starting with v (blank = v<VERSION file>)'
+        required: false
+      message:
+        description: 'Annotation message, used only when creating a new tag'
+        required: false
+        default: 'release'
+      base:
+        description: 'Base tag/commit to diff against (blank = auto-detect)'
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history + tags: base-tag detection below needs to walk backwards
+      # past the tag being released.
+      - name: Checkout with full history and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Configure git identity (only used if this run creates a tag)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Step 1: resolve the tag to release. A push already names it; dispatch
+      # can name one explicitly, or fall back to the VERSION file -- the same
+      # value Lab 5 tags by hand -- and create it if it doesn't exist yet.
+      - name: Resolve or create the target tag
+        id: vars
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          MESSAGE: ${{ github.event.inputs.message }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "push" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "==> triggered by tag push: $TAG"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAG="${INPUT_TAG:-v$(cat VERSION)}"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "==> $TAG already exists, reusing it"
+          else
+            echo "==> creating and pushing new tag: $TAG"
+            git tag -a "$TAG" -m "${MESSAGE:-release}"
+            git push origin "$TAG"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the target tag
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: git checkout "$TAG"
+
+      # Step 2: find the previous release to diff against. --match 'v*' keeps
+      # this scoped to release tags even if labs leave other tags lying around.
+      - name: Find the base tag to diff against
+        id: base
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          INPUT_BASE: ${{ github.event.inputs.base }}
+        run: |
+          if [ -n "$INPUT_BASE" ]; then
+            BASE="$INPUT_BASE"
+            echo "using given base: $BASE"
+          elif PREV=$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null); then
+            BASE="$PREV"
+            echo "found previous tag: $BASE"
+          else
+            BASE="4b825dc642cb6eb9a060e54bf8d69288fbee4904" # empty tree
+            echo "no previous tag -- diffing against an empty tree"
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+      # Step 3: the same gate deploy.js and the pre-commit hook already run
+      # locally -- a release should never ship code the tests reject.
+      - name: Run tests
+        run: node --test
+
+      # Step 4: find PRs merged between base and tag, from "#123" in commit
+      # subjects -- same technique as release-project.yml, no extra API calls.
+      - name: Find PRs included in this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.vars.outputs.tag }}
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          set -euo pipefail
+          PR_NUMBERS=$(git log --pretty=format:%s "$BASE".."$TAG" | grep -oE '#[0-9]+' | tr -d '#' | sort -un || true)
+
+          : > pr-list.md
+          if [ -z "$PR_NUMBERS" ]; then
+            echo "_No PRs merged between $BASE and $TAG (may have been pushed directly to main)_" >> pr-list.md
+          else
+            echo "| PR | Title | Author |" >> pr-list.md
+            echo "|---|---|---|" >> pr-list.md
+            while read -r NUM; do
+              [ -z "$NUM" ] && continue
+              TITLE=$(gh pr view "$NUM" --json title -q .title 2>/dev/null || echo "")
+              [ -z "$TITLE" ] && continue
+              URL=$(gh pr view "$NUM" --json url -q .url 2>/dev/null || echo "")
+              AUTHOR=$(gh pr view "$NUM" --json author -q .author.login 2>/dev/null || echo "-")
+              echo "| [#$NUM]($URL) | $TITLE | @$AUTHOR |" >> pr-list.md
+            done <<< "$PR_NUMBERS"
+          fi
+          cat pr-list.md
+
+      # Step 5: package the working tree as it stood at $TAG. One app, one
+      # artifact -- no per-project split needed here.
+      - name: Build the release artifact
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          NAME="git-sdlc-exercise-${TAG}"
+
+          STAGE="$(mktemp -d)"
+          mkdir -p "$STAGE/$NAME"
+          git ls-files > files.txt
+          tar -cf - -T files.txt | tar -xf - -C "$STAGE/$NAME"
+
+          {
+            echo "$TAG"
+            echo "$NOW"
+            echo "commit: $(git rev-parse HEAD)"
+          } > "$STAGE/$NAME/VERSION"
+
+          tar -czf "dist/${NAME}.tar.gz" -C "$STAGE" "$NAME"
+          rm -rf "$STAGE"
+
+          git diff --name-only --diff-filter=AMR "$BASE" "$TAG" > dist/changed-files.txt || true
+
+          : > dist/checksums.txt
+          while read -r F; do
+            sha256sum "$F" >> dist/checksums.txt
+          done < files.txt
+
+          ls -la dist/
+
+      # Step 6: notes for the release page -- what's in it, what changed, how
+      # to run it. `npm run deploy` after checking out the tag is the same
+      # rollback path Lab 5 already teaches by hand.
+      - name: Write release notes
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          {
+            echo "# $TAG"
+            echo
+            echo "Diffed against \`$BASE\`."
+            echo
+            echo "## Pull requests in this release"
+            echo
+            cat pr-list.md
+            echo
+            echo "## Files changed"
+            echo
+            echo '```'
+            cat dist/changed-files.txt
+            echo '```'
+            echo
+            echo "## Run this release"
+            echo
+            echo '```bash'
+            echo "git fetch --tags && git checkout $TAG"
+            echo "npm run deploy"
+            echo '```'
+          } > dist/RELEASE-NOTES.md
+          cat dist/RELEASE-NOTES.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            dist/*.tar.gz dist/checksums.txt dist/changed-files.txt \
+            --title "$TAG" \
+            --notes-file dist/RELEASE-NOTES.md
