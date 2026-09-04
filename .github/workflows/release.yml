@@ -11,10 +11,10 @@
 #
 # Base-tag diffing does NOT carry over as-is: emr-demo just diffs against the
 # previous tag. Here every release is published as a GitHub pre-release (see
-# the last step) until mark-deployed.yml flags it deployed, and the base tag
-# is whatever `gh release view` reports as latest -- i.e. the last release
-# someone actually confirmed shipped, not just the last one cut. That way a
-# tag that got created but never deployed doesn't reset what counts as "new"
+# the last step), and the base tag is whatever `gh release view` reports as
+# latest -- i.e. the last release someone promoted out of pre-release by
+# editing it on the Releases page, not just the last tag cut. That way a
+# release that was cut but never deployed doesn't reset what counts as "new"
 # in the next release's PR list and changed-files diff.
 name: Release
 
@@ -97,7 +97,7 @@ jobs:
       # Step 2: find the last *deployed* release to diff against. `gh release
       # view` with no tag returns GitHub's own "latest release" -- defined as
       # the most recent non-prerelease, non-draft release -- which is exactly
-      # the last one mark-deployed.yml confirmed shipped.
+      # the last one someone promoted out of pre-release by hand.
       - name: Find the base tag to diff against
         id: base
         env:
@@ -217,9 +217,10 @@ jobs:
           cat dist/RELEASE-NOTES.md
 
       # Step 7: publish as a pre-release -- every release starts flagged
-      # "not deployed yet" in the GitHub UI. Run mark-deployed.yml after
-      # actually shipping it to flip that off; the base-tag step above only
-      # counts a release once that has happened.
+      # "not deployed yet" in the GitHub UI. After actually deploying it,
+      # edit the release on the Releases page and uncheck "Set as a
+      # pre-release" (or check "Set as the latest release"). The base-tag
+      # step above only counts a release once that has happened.
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
